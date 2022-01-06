@@ -1,4 +1,4 @@
-module github.com/go-admin-team/gorm-adapter/v3
+module github.com/bahezi/gorm-adapter/v3
 
 go 1.14
 
