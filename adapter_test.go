@@ -15,9 +15,10 @@
 package gormadapter
 
 import (
-	"github.com/jackc/pgconn"
-	"gorm.io/driver/sqlite"
+	"fmt"
 	"log"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/casbin/casbin/v2"
@@ -26,6 +27,7 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func testGetPolicy(t *testing.T, e *casbin.Enforcer, res [][]string) {
@@ -35,6 +37,50 @@ func testGetPolicy(t *testing.T, e *casbin.Enforcer, res [][]string) {
 	if !util.Array2DEquals(res, myRes) {
 		t.Error("Policy: ", myRes, ", supposed to be ", res)
 	}
+}
+
+func testGetPolicyWithoutOrder(t *testing.T, e *casbin.Enforcer, res [][]string) {
+	myRes := e.GetPolicy()
+	log.Print("Policy: ", myRes)
+
+	if !arrayEqualsWithoutOrder(myRes, res) {
+		t.Error("Policy: ", myRes, ", supposed to be ", res)
+	}
+}
+
+func arrayEqualsWithoutOrder(a [][]string, b [][]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	mapA := make(map[int]string)
+	mapB := make(map[int]string)
+	order := make(map[int]struct{})
+	l := len(a)
+
+	for i := 0; i < l; i++ {
+		mapA[i] = util.ArrayToString(a[i])
+		mapB[i] = util.ArrayToString(b[i])
+	}
+
+	for i := 0; i < l; i++ {
+		for j := 0; j < l; j++ {
+			if _, ok := order[j]; ok {
+				if j == l-1 {
+					return false
+				} else {
+					continue
+				}
+			}
+			if mapA[i] == mapB[j] {
+				order[j] = struct{}{}
+				break
+			} else if j == l-1 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func initPolicy(t *testing.T, a *Adapter) {
@@ -74,7 +120,6 @@ func testSaveLoad(t *testing.T, a *Adapter) {
 	// Now the DB has policy, so we can provide a normal use case.
 	// Create an adapter and an enforcer.
 	// NewEnforcer() will load the policy automatically.
-
 	e, _ := casbin.NewEnforcer("examples/rbac_model.conf", a)
 	testGetPolicy(t, e, [][]string{{"alice", "data1", "read"}, {"bob", "data2", "write"}, {"data2_admin", "data2", "read"}, {"data2_admin", "data2", "write"}})
 }
@@ -108,7 +153,7 @@ func initAdapterWithGormInstance(t *testing.T, db *gorm.DB) *Adapter {
 }
 
 func initAdapterWithGormInstanceAndCustomTable(t *testing.T, db *gorm.DB) *Adapter {
-	type CasbinRule struct {
+	type TestCasbinRule struct {
 		ID    uint   `gorm:"primaryKey;autoIncrement"`
 		Ptype string `gorm:"size:128;uniqueIndex:unique_index"`
 		V0    string `gorm:"size:128;uniqueIndex:unique_index"`
@@ -117,10 +162,12 @@ func initAdapterWithGormInstanceAndCustomTable(t *testing.T, db *gorm.DB) *Adapt
 		V3    string `gorm:"size:128;uniqueIndex:unique_index"`
 		V4    string `gorm:"size:128;uniqueIndex:unique_index"`
 		V5    string `gorm:"size:128;uniqueIndex:unique_index"`
+		V6    string `gorm:"size:128;uniqueIndex:unique_index"`
+		V7    string `gorm:"size:128;uniqueIndex:unique_index"`
 	}
 
 	// Create an adapter
-	a, _ := NewAdapterByDBWithCustomTable(db, &CasbinRule{})
+	a, _ := NewAdapterByDBWithCustomTable(db, &TestCasbinRule{}, "test_casbin_rule")
 	// Initialize some policy in DB.
 	initPolicy(t, a)
 	// Now the DB has policy, so we can provide a normal use case.
@@ -142,6 +189,57 @@ func initAdapterWithGormInstanceByName(t *testing.T, db *gorm.DB, name string) *
 	return a
 }
 
+func initAdapterWithoutAutoMigrate(t *testing.T, db *gorm.DB) *Adapter {
+	var err error
+	var customTableName = "without_auto_migrate_custom_table"
+	hasTable := db.Migrator().HasTable(customTableName)
+	if hasTable {
+		err = db.Migrator().DropTable(customTableName)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	TurnOffAutoMigrate(db)
+
+	type CustomCasbinRule struct {
+		ID    uint   `gorm:"primaryKey;autoIncrement"`
+		Ptype string `gorm:"size:50"`
+		V0    string `gorm:"size:50"`
+		V1    string `gorm:"size:50"`
+		V2    string `gorm:"size:50"`
+		V3    string `gorm:"size:50"`
+		V4    string `gorm:"size:50"`
+		V5    string `gorm:"size:50"`
+		V6    string `gorm:"size:50"`
+		V7    string `gorm:"size:50"`
+	}
+	a, err := NewAdapterByDBWithCustomTable(db, &CustomCasbinRule{}, customTableName)
+
+	hasTable = a.db.Migrator().HasTable(a.getFullTableName())
+	if hasTable {
+		t.Fatal("AutoMigration has been disabled but tables are still created in NewAdapterWithoutAutoMigrate method")
+	}
+	err = a.db.Migrator().CreateTable(&CustomCasbinRule{})
+	if err != nil {
+		panic(err)
+	}
+	initPolicy(t, a)
+	return a
+}
+
+func initAdapterWithGormInstanceByMulDb(t *testing.T, dbPool DbPool, dbName string, prefix string, tableName string) *Adapter {
+	//Create an Adapter
+	a, _ := NewAdapterByMulDb(dbPool, dbName, prefix, tableName)
+	// Initialize some policy in DB.
+	initPolicy(t, a)
+	// Now the DB has policy, so we can provide a normal use case.
+	// Note: you don't need to look at the above code
+	// if you already have a working DB with policy inside.
+
+	return a
+}
+
 func initAdapterWithGormInstanceByPrefixAndName(t *testing.T, db *gorm.DB, prefix, name string) *Adapter {
 	//Create an Adapter
 	a, _ := NewAdapterByDBUseTableName(db, prefix, name)
@@ -154,24 +252,24 @@ func initAdapterWithGormInstanceByPrefixAndName(t *testing.T, db *gorm.DB, prefi
 	return a
 }
 
-//func TestNilField(t *testing.T) {
-//	a, err := NewAdapter("sqlite3", "test.db")
-//	assert.Nil(t, err)
-//	defer os.Remove("test.db")
-//
-//	e, err := casbin.NewEnforcer("examples/rbac_model.conf", a)
-//	assert.Nil(t, err)
-//	e.EnableAutoSave(false)
-//
-//	ok, err := e.AddPolicy("", "data1", "write")
-//	assert.Nil(t, err)
-//	e.SavePolicy()
-//	assert.Nil(t, e.LoadPolicy())
-//
-//	ok, err = e.Enforce("", "data1", "write")
-//	assert.Nil(t, err)
-//	assert.Equal(t, ok, true)
-//}
+func TestNilField(t *testing.T) {
+	a, err := NewAdapter("sqlite3", "test.db")
+	assert.Nil(t, err)
+	defer os.Remove("test.db")
+
+	e, err := casbin.NewEnforcer("examples/rbac_model.conf", a)
+	assert.Nil(t, err)
+	e.EnableAutoSave(false)
+
+	ok, err := e.AddPolicy("", "data1", "write")
+	assert.Nil(t, err)
+	e.SavePolicy()
+	assert.Nil(t, e.LoadPolicy())
+
+	ok, err = e.Enforce("", "data1", "write")
+	assert.Nil(t, err)
+	assert.Equal(t, ok, true)
+}
 
 func testAutoSave(t *testing.T, a *Adapter) {
 
@@ -245,20 +343,41 @@ func testUpdatePolicy(t *testing.T, a *Adapter) {
 	testGetPolicy(t, e, [][]string{{"alice", "data1", "write"}, {"bob", "data2", "write"}, {"data2_admin", "data2", "read"}, {"data2_admin", "data2", "write"}})
 }
 
+func testUpdatePolicies(t *testing.T, a *Adapter) {
+	// NewEnforcer() will load the policy automatically.
+	e, _ := casbin.NewEnforcer("examples/rbac_model.conf", a)
+
+	e.EnableAutoSave(true)
+	e.UpdatePolicies([][]string{{"alice", "data1", "write"}, {"bob", "data2", "write"}}, [][]string{{"alice", "data1", "read"}, {"bob", "data2", "read"}})
+	e.LoadPolicy()
+	testGetPolicy(t, e, [][]string{{"alice", "data1", "read"}, {"bob", "data2", "read"}, {"data2_admin", "data2", "read"}, {"data2_admin", "data2", "write"}})
+}
+
+func testUpdateFilteredPolicies(t *testing.T, a *Adapter) {
+	// NewEnforcer() will load the policy automatically.
+	e, _ := casbin.NewEnforcer("examples/rbac_model.conf", a)
+
+	e.EnableAutoSave(true)
+	e.UpdateFilteredPolicies([][]string{{"alice", "data1", "write"}}, 0, "alice", "data1", "read")
+	e.UpdateFilteredPolicies([][]string{{"bob", "data2", "read"}}, 0, "bob", "data2", "write")
+	e.LoadPolicy()
+	testGetPolicyWithoutOrder(t, e, [][]string{{"alice", "data1", "write"}, {"data2_admin", "data2", "read"}, {"data2_admin", "data2", "write"}, {"bob", "data2", "read"}})
+}
+
 func TestAdapterWithCustomTable(t *testing.T) {
-	db, err := gorm.Open(postgres.Open("user=postgres host=127.0.0.1 port=5432 sslmode=disable"), &gorm.Config{})
+	db, err := gorm.Open(postgres.Open("user=postgres password=postgres host=127.0.0.1 port=5432 sslmode=disable"), &gorm.Config{})
 	if err != nil {
 		panic(err)
 	}
 
 	if err = db.Exec("CREATE DATABASE casbin_custom_table").Error; err != nil {
 		// 42P04 is	duplicate_database
-		if err.(*pgconn.PgError).Code != "42P04" {
+		if !strings.Contains(fmt.Sprintf("%s", err), "42P04") {
 			panic(err)
 		}
 	}
 
-	db, err = gorm.Open(postgres.Open("user=postgres host=127.0.0.1 port=5432 sslmode=disable dbname=casbin_custom_table"), &gorm.Config{})
+	db, err = gorm.Open(postgres.Open("user=postgres password=postgres host=127.0.0.1 port=5432 sslmode=disable dbname=casbin_custom_table"), &gorm.Config{})
 	if err != nil {
 		panic(err)
 	}
@@ -271,12 +390,115 @@ func TestAdapterWithCustomTable(t *testing.T) {
 	testFilteredPolicy(t, a)
 }
 
+func TestAdapterWithoutAutoMigrate(t *testing.T) {
+	db, err := gorm.Open(mysql.Open("root:@tcp(127.0.0.1:3306)/casbin"), &gorm.Config{})
+	if err != nil {
+		panic(err)
+	}
+
+	a := initAdapterWithoutAutoMigrate(t, db)
+	testAutoSave(t, a)
+	testSaveLoad(t, a)
+
+	a = initAdapterWithoutAutoMigrate(t, db)
+	testFilteredPolicy(t, a)
+
+	db, err = gorm.Open(postgres.Open("user=postgres password=postgres host=localhost port=5432 sslmode=disable TimeZone=Asia/Shanghai"), &gorm.Config{})
+	if err != nil {
+		panic(err)
+	}
+
+	if err = db.Exec("CREATE DATABASE casbin_custom_table").Error; err != nil {
+		// 42P04 is	duplicate_database
+		if !strings.Contains(fmt.Sprintf("%s", err), "42P04") {
+			panic(err)
+		}
+	}
+
+	db, err = gorm.Open(postgres.Open("user=postgres password=postgres host=127.0.0.1 port=5432 sslmode=disable dbname=casbin_custom_table"), &gorm.Config{})
+	if err != nil {
+		panic(err)
+	}
+
+	a = initAdapterWithoutAutoMigrate(t, db)
+	testAutoSave(t, a)
+	testSaveLoad(t, a)
+
+	a = initAdapterWithoutAutoMigrate(t, db)
+	testFilteredPolicy(t, a)
+
+	db, err = gorm.Open(sqlite.Open("casbin.db"), &gorm.Config{})
+	if err != nil {
+		panic(err)
+	}
+
+	a = initAdapterWithoutAutoMigrate(t, db)
+	testAutoSave(t, a)
+	testSaveLoad(t, a)
+
+	a = initAdapterWithoutAutoMigrate(t, db)
+	testFilteredPolicy(t, a)
+}
+
+func TestAdapterWithMulDb(t *testing.T) {
+	//create new database
+	NewAdapter("mysql", "root:@tcp(127.0.0.1:3306)/", "casbin")
+	NewAdapter("mysql", "root:@tcp(127.0.0.1:3306)/", "casbin2")
+
+	testBasicFeatures(t)
+	testIndependenceBetweenMulDb(t)
+}
+
+func testIndependenceBetweenMulDb(t *testing.T) {
+	dsn := "root:@tcp(127.0.0.1:3306)/casbin"
+	dsn2 := "root:@tcp(127.0.0.1:3306)/casbin2"
+
+	dbPool, err := InitDbResolver([]gorm.Dialector{mysql.Open(dsn), mysql.Open(dsn2)}, []string{"casbin", "casbin2"})
+
+	if err != nil {
+		panic(err)
+	}
+
+	//test independence between multi adapter
+	a1 := initAdapterWithGormInstanceByMulDb(t, dbPool, "casbin", "", "casbin_rule")
+	a1.AddPolicy("p", "p", []string{"alice", "book", "read"})
+	a2 := initAdapterWithGormInstanceByMulDb(t, dbPool, "casbin2", "", "casbin_rule2")
+	e, _ := casbin.NewEnforcer("./examples/rbac_model.conf", a2)
+	res, err := e.Enforce("alice", "book", "read")
+	if err != nil || res {
+		t.Error("switch DB fail because data don't change")
+	}
+}
+
+func testBasicFeatures(t *testing.T) {
+	dsn := "root:@tcp(127.0.0.1:3306)/casbin"
+	dsn2 := "root:@tcp(127.0.0.1:3306)/casbin2"
+
+	dbPool, err := InitDbResolver([]gorm.Dialector{mysql.Open(dsn), mysql.Open(dsn2)}, []string{"casbin", "casbin2"})
+
+	if err != nil {
+		panic(err)
+	}
+	//test basic features
+	a := initAdapterWithGormInstanceByMulDb(t, dbPool, "casbin", "", "casbin_rule")
+	testAutoSave(t, a)
+	testSaveLoad(t, a)
+	a = initAdapterWithGormInstanceByMulDb(t, dbPool, "casbin", "", "casbin_rule")
+	testFilteredPolicy(t, a)
+
+	a = initAdapterWithGormInstanceByMulDb(t, dbPool, "casbin2", "", "casbin_rule2")
+	testAutoSave(t, a)
+	testSaveLoad(t, a)
+	a = initAdapterWithGormInstanceByMulDb(t, dbPool, "casbin2", "", "casbin_rule2")
+	testFilteredPolicy(t, a)
+}
+
 func TestAdapters(t *testing.T) {
 	a := initAdapter(t, "mysql", "root:@tcp(127.0.0.1:3306)/", "casbin", "casbin_rule")
 	testAutoSave(t, a)
 	testSaveLoad(t, a)
 
-	a = initAdapter(t, "postgres", "user=postgres host=127.0.0.1 port=5432 sslmode=disable")
+	a = initAdapter(t, "postgres", "user=postgres password=postgres host=127.0.0.1 port=5432 sslmode=disable")
 	testAutoSave(t, a)
 	testSaveLoad(t, a)
 
@@ -295,7 +517,7 @@ func TestAdapters(t *testing.T) {
 	a = initAdapterWithGormInstance(t, db)
 	testFilteredPolicy(t, a)
 
-	db, err = gorm.Open(postgres.Open("user=postgres host=127.0.0.1 port=5432 sslmode=disable dbname=casbin"), &gorm.Config{})
+	db, err = gorm.Open(postgres.Open("user=postgres password=postgres host=127.0.0.1 port=5432 sslmode=disable dbname=casbin"), &gorm.Config{})
 	if err != nil {
 		panic(err)
 	}
@@ -328,7 +550,7 @@ func TestAdapters(t *testing.T) {
 	a = initAdapterWithGormInstanceByName(t, db, "casbin_rule")
 	testFilteredPolicy(t, a)
 
-	db, err = gorm.Open(postgres.Open("user=postgres host=127.0.0.1 port=5432 sslmode=disable dbname=casbin"), &gorm.Config{})
+	db, err = gorm.Open(postgres.Open("user=postgres password=postgres host=127.0.0.1 port=5432 sslmode=disable dbname=casbin"), &gorm.Config{})
 	if err != nil {
 		panic(err)
 	}
@@ -359,7 +581,45 @@ func TestAdapters(t *testing.T) {
 
 	a = initAdapter(t, "mysql", "root:@tcp(127.0.0.1:3306)/", "casbin", "casbin_rule")
 	testUpdatePolicy(t, a)
+	testUpdatePolicies(t, a)
+	testUpdateFilteredPolicies(t, a)
+
+	a = initAdapter(t, "mysql", "root:@tcp(127.0.0.1:3306)/", "casbin", "casbin_rule")
+	a.AddLogger(logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{}))
+	testUpdatePolicy(t, a)
+	testUpdatePolicies(t, a)
+	testUpdateFilteredPolicies(t, a)
+
+	a = initAdapter(t, "postgres", "user=postgres password=postgres host=127.0.0.1 port=5432 sslmode=disable")
+	testUpdatePolicy(t, a)
+	testUpdatePolicies(t, a)
+	testUpdateFilteredPolicies(t, a)
+
+	a = initAdapter(t, "postgres", "user=postgres password=postgres host=127.0.0.1 port=5432 sslmode=disable")
+	a.AddLogger(logger.New(log.New(os.Stdout, "\r\n", log.LstdFlags), logger.Config{}))
+	testUpdatePolicy(t, a)
+	testUpdatePolicies(t, a)
+	testUpdateFilteredPolicies(t, a)
 
 	a = initAdapter(t, "sqlite3", "casbin.db")
 	testUpdatePolicy(t, a)
+	testUpdatePolicies(t, a)
+}
+
+func TestAddPolicies(t *testing.T) {
+	a := initAdapter(t, "mysql", "root:@tcp(127.0.0.1:3306)/", "casbin", "casbin_rule")
+	e, _ := casbin.NewEnforcer("examples/rbac_model.conf", a)
+	e.AddPolicies([][]string{{"jack", "data1", "read"}, {"jack2", "data1", "read"}})
+	e.LoadPolicy()
+
+	testGetPolicy(t, e, [][]string{{"alice", "data1", "read"}, {"bob", "data2", "write"}, {"data2_admin", "data2", "read"}, {"data2_admin", "data2", "write"}, {"jack", "data1", "read"}, {"jack2", "data1", "read"}})
+}
+
+func TestAddPoliciesFullColumn(t *testing.T) {
+	a := initAdapter(t, "mysql", "root:@tcp(127.0.0.1:3306)/", "casbin", "casbin_rule")
+	e, _ := casbin.NewEnforcer("examples/rbac_model.conf", a)
+	e.AddPolicies([][]string{{"jack", "data1", "read", "col3", "col4", "col5", "col6", "col7"}, {"jack2", "data1", "read", "col3", "col4", "col5", "col6", "col7"}})
+	e.LoadPolicy()
+
+	testGetPolicy(t, e, [][]string{{"alice", "data1", "read"}, {"bob", "data2", "write"}, {"data2_admin", "data2", "read"}, {"data2_admin", "data2", "write"}, {"jack", "data1", "read", "col3", "col4", "col5", "col6", "col7"}, {"jack2", "data1", "read", "col3", "col4", "col5", "col6", "col7"}})
 }
